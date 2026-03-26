@@ -1,0 +1,7 @@
+{
+  "id": "resp_no_usage",
+  "status": "ok",
+  "result": {
+    "text": "Usage block intentionally omitted for fallback testing."
+  }
+}

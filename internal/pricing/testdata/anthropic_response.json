@@ -1,0 +1,15 @@
+{
+  "id": "msg_01ABC",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Acknowledged."
+    }
+  ],
+  "usage": {
+    "input_tokens": 210,
+    "output_tokens": 95
+  }
+}

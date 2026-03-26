@@ -1,0 +1,5 @@
+data: {"id":"chunk-1","choices":[{"delta":{"content":"partial"}}]}
+
+data: {"id":"chunk-2","choices":[{"delta":{"content":"done"}}]}
+
+data: [DONE]
