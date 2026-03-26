@@ -17,10 +17,10 @@ import (
 )
 
 type capturedRequest struct {
-	body   string
-	path   string
-	method string
 	header http.Header
+	body   string
+	method string
+	path   string
 }
 
 func TestServer_ProviderDetectionRouting(t *testing.T) {
@@ -125,13 +125,13 @@ func TestServer_NonStreamingPassthroughAndHeaderStripping(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name               string
-		requestPath        string
-		requestBody        string
 		requestHeaders     map[string]string
-		wantStatusCode     int
-		wantBody           string
+		name               string
+		requestBody        string
+		requestPath        string
 		wantResponseHeader string
+		wantBody           string
+		wantStatusCode     int
 	}{
 		{
 			name:        "passthrough body status and non-oberwatch headers",
@@ -344,9 +344,9 @@ func TestServer_SSEStreamingPassthrough(t *testing.T) {
 			readErr := make(chan error, 1)
 			go func() {
 				buffer := make([]byte, len(tt.firstChunk))
-				_, err := io.ReadFull(resp.Body, buffer)
-				if err != nil {
-					readErr <- err
+				_, readFullErr := io.ReadFull(resp.Body, buffer)
+				if readFullErr != nil {
+					readErr <- readFullErr
 					return
 				}
 				firstRead <- string(buffer)
@@ -357,8 +357,8 @@ func TestServer_SSEStreamingPassthrough(t *testing.T) {
 				if got != tt.firstChunk {
 					t.Fatalf("first streamed chunk = %q, want %q", got, tt.firstChunk)
 				}
-			case err := <-readErr:
-				t.Fatalf("stream read error = %v", err)
+			case streamErr := <-readErr:
+				t.Fatalf("stream read error = %v", streamErr)
 			case <-time.After(2 * time.Second):
 				close(releaseSecondChunk)
 				t.Fatal("timed out waiting for first streamed chunk through proxy")
@@ -379,19 +379,16 @@ func TestServer_SSEStreamingPassthrough(t *testing.T) {
 func TestServer_HealthAndMiddlewareChain(t *testing.T) {
 	t.Parallel()
 
+	//nolint:govet // keep table fields readable for test intent.
 	tests := []struct {
-		name             string
-		path             string
-		wantStatus       int
-		wantHookOrder    []string
-		wantUpstreamHits int32
+		wantHookOrder []string
+		name          string
+		path          string
 	}{
 		{
-			name:             "health request runs gate then trace and does not proxy upstream",
-			path:             healthPath,
-			wantStatus:       http.StatusOK,
-			wantHookOrder:    []string{"gate", "trace"},
-			wantUpstreamHits: 0,
+			name:          "health request runs gate then trace and does not proxy upstream",
+			path:          healthPath,
+			wantHookOrder: []string{"gate", "trace"},
 		},
 	}
 
@@ -448,8 +445,8 @@ func TestServer_HealthAndMiddlewareChain(t *testing.T) {
 				_ = resp.Body.Close()
 			})
 
-			if resp.StatusCode != tt.wantStatus {
-				t.Fatalf("status code = %d, want %d", resp.StatusCode, tt.wantStatus)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status code = %d, want %d", resp.StatusCode, http.StatusOK)
 			}
 
 			payload, err := io.ReadAll(resp.Body)
@@ -478,8 +475,8 @@ func TestServer_HealthAndMiddlewareChain(t *testing.T) {
 			}
 
 			totalHits := atomic.LoadInt32(&openAIHits) + atomic.LoadInt32(&anthropicHits)
-			if totalHits != tt.wantUpstreamHits {
-				t.Fatalf("upstream hits = %d, want %d", totalHits, tt.wantUpstreamHits)
+			if totalHits != 0 {
+				t.Fatalf("upstream hits = %d, want %d", totalHits, 0)
 			}
 		})
 	}
@@ -554,11 +551,11 @@ func TestServer_ProxyErrorReturnsBadGateway(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		upstream   string
-		path       string
-		wantStatus int
 		wantBody   string
+		name       string
+		path       string
+		upstream   string
+		wantStatus int
 	}{
 		{
 			name:       "connection error is translated to bad gateway",

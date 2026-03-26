@@ -71,8 +71,8 @@ func TestStripOberwatchHeaders_TableDriven(t *testing.T) {
 
 	tests := []struct {
 		input http.Header
-		name  string
 		want  http.Header
+		name  string
 	}{
 		{
 			name: "removes all x-oberwatch variants and keeps others",
@@ -179,13 +179,12 @@ func TestBuildTargets_TableDriven(t *testing.T) {
 func TestWriteHealthResponse_TableDriven(t *testing.T) {
 	t.Parallel()
 
+	//nolint:govet // keep table fields explicit for test readability.
 	tests := []struct {
-		name           string
 		wantStatusCode int
 		wantStatus     string
 	}{
 		{
-			name:           "returns json ok payload",
 			wantStatusCode: http.StatusOK,
 			wantStatus:     "ok",
 		},
@@ -193,7 +192,7 @@ func TestWriteHealthResponse_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run("write health response", func(t *testing.T) {
 			t.Parallel()
 
 			recorder := httptest.NewRecorder()

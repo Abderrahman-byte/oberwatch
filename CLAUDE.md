@@ -176,6 +176,24 @@ func TestCalculateCost(t *testing.T) {
 - PR titles follow the same format.
 - Squash merge to main.
 
+## Required End-of-Task Checks (MANDATORY)
+
+At the end of every coding task, run these commands from the `oberwatch/` repo root in this order:
+
+1. Format:
+  - `PATH=/usr/local/go/bin:$PATH /usr/local/go/bin/gofmt -w .`
+2. Lint (must match CI linter/version behavior):
+  - `PATH=/usr/local/go/bin:$PATH GOCACHE=/tmp/go-build GOLANGCI_LINT_CACHE=/tmp/golangci-cache ./.tools/bin/golangci-lint run`
+3. Tests (same as CI):
+  - `PATH=/usr/local/go/bin:$PATH GOCACHE=/tmp/go-build /usr/local/go/bin/go test -race -coverprofile=coverage.out ./...`
+4. Coverage gate (same as CI threshold):
+  - `COVERAGE=$(PATH=/usr/local/go/bin:$PATH /usr/local/go/bin/go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//') && echo "Total coverage: ${COVERAGE}%" && if (( $(echo "$COVERAGE < 80" | bc -l) )); then echo "Coverage ${COVERAGE}% is below 80% threshold"; exit 1; fi`
+5. Vet:
+  - `PATH=/usr/local/go/bin:$PATH GOCACHE=/tmp/go-build /usr/local/go/bin/go vet ./...`
+
+If all checks pass, automatically generate a Conventional Commit message proposal summarizing the change.
+Do not create or amend a commit unless explicitly requested by the user.
+
 ---
 
 ## What NOT to Do
@@ -188,3 +206,4 @@ func TestCalculateCost(t *testing.T) {
 - Do NOT write tests that sleep (`time.Sleep`). Use channels, contexts, or test clocks.
 - Do NOT hardcode port numbers, file paths, or URLs. Use config.
 - Do NOT log sensitive data (API keys, prompt content, user data).
+- DO NOT empty file contents without explicit user consent in the current request.
