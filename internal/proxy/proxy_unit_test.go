@@ -291,6 +291,58 @@ func TestNew_HealthPathRunsHookChainWithoutUpstreamCalls(t *testing.T) {
 	}
 }
 
+func TestNew_ManagementRoutesTakePrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "management budgets path is served by management handler",
+			path: "/_oberwatch/api/v1/budgets",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.DefaultConfig()
+			cfg.Upstream.OpenAI.BaseURL = "https://api.openai.com"
+			cfg.Upstream.Anthropic.BaseURL = "https://api.anthropic.com"
+			cfg.Upstream.DefaultProvider = config.ProviderOpenAI
+
+			var managementHits int
+			server, err := New(cfg, Hooks{
+				Management: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					managementHits++
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusCreated)
+					if _, writeErr := w.Write([]byte(`{"status":"management"}`)); writeErr != nil {
+						t.Fatalf("Write() error = %v", writeErr)
+					}
+				}),
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("status code = %d, want %d", recorder.Code, http.StatusCreated)
+			}
+			if managementHits != 1 {
+				t.Fatalf("management hits = %d, want %d", managementHits, 1)
+			}
+		})
+	}
+}
+
 func TestGateMiddleware_BudgetRejectAndDowngrade(t *testing.T) {
 	t.Parallel()
 

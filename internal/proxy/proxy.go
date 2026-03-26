@@ -22,6 +22,7 @@ import (
 
 const (
 	healthPath                 = "/_oberwatch/api/v1/health"
+	managementPathPrefix       = "/_oberwatch/api/v1/"
 	oberwatchHeaderPrefixLower = "x-oberwatch-"
 )
 
@@ -43,12 +44,13 @@ type Hook func(*http.Request)
 
 // Hooks contains middleware callbacks used by the proxy chain.
 type Hooks struct {
-	Gate     Hook
-	Trace    Hook
-	Budget   *budget.BudgetManager
-	Pricing  *pricing.PricingTable
-	CostSink storage.CostRecordSink
-	Logger   *slog.Logger
+	Gate       Hook
+	Trace      Hook
+	Budget     *budget.BudgetManager
+	Pricing    *pricing.PricingTable
+	CostSink   storage.CostRecordSink
+	Management http.Handler
+	Logger     *slog.Logger
 }
 
 // Server is the HTTP reverse proxy for upstream LLM providers.
@@ -106,6 +108,10 @@ func New(cfg config.Config, hooks Hooks) (*Server, error) {
 	}
 
 	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, managementPathPrefix) && hooks.Management != nil {
+			hooks.Management.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == healthPath {
 			writeHealthResponse(w)
 			return

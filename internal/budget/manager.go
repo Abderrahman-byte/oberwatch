@@ -83,6 +83,34 @@ type Snapshot struct {
 	Killed          bool
 }
 
+// BudgetView is an API-friendly view of one agent budget state.
+//
+//nolint:revive,govet // Name/field grouping are intentional for API clarity.
+type BudgetView struct {
+	Agent           string
+	Status          string
+	Period          config.BudgetPeriod
+	ActionOnExceed  config.BudgetAction
+	PeriodStartedAt time.Time
+	PeriodResetsAt  time.Time
+	LimitUSD        float64
+	SpentUSD        float64
+	RemainingUSD    float64
+	PercentageUsed  float64
+}
+
+// BudgetUpdate applies mutable budget policy fields for one agent.
+//
+//nolint:revive,govet // Name/field grouping are intentional for API clarity.
+type BudgetUpdate struct {
+	Period                config.BudgetPeriod
+	ActionOnExceed        config.BudgetAction
+	DowngradeThresholdPct float64
+	LimitUSD              float64
+	DowngradeChain        []string
+	AlertThresholdsPct    []float64
+}
+
 // Dispatcher routes budget-generated alert events.
 type Dispatcher interface {
 	Dispatch(context.Context, alert.Alert)
@@ -645,5 +673,115 @@ func (m *BudgetManager) dispatchAlerts(events []alert.Alert) {
 	ctx := context.Background()
 	for _, event := range events {
 		m.dispatcher.Dispatch(ctx, event)
+	}
+}
+
+// ListBudgets returns all known per-agent budget states.
+func (m *BudgetManager) ListBudgets() []BudgetView {
+	now := m.clock.Now().UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keys := make(map[string]struct{}, len(m.agentPolicy)+len(m.state))
+	for key := range m.agentPolicy {
+		keys[key] = struct{}{}
+	}
+	for key := range m.state {
+		keys[key] = struct{}{}
+	}
+
+	result := make([]BudgetView, 0, len(keys))
+	for agent := range keys {
+		policy := m.policyForAgentLocked(agent)
+		state := m.stateForAgentLocked(agent, policy, now)
+		m.maybeResetPeriodLocked(state, policy, now)
+		result = append(result, toBudgetView(agent, policy, state))
+	}
+
+	return result
+}
+
+// GetBudget returns one agent budget state.
+func (m *BudgetManager) GetBudget(agent string) BudgetView {
+	normalizedAgent := normalizeAgent(agent)
+	now := m.clock.Now().UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	policy := m.policyForAgentLocked(normalizedAgent)
+	state := m.stateForAgentLocked(normalizedAgent, policy, now)
+	m.maybeResetPeriodLocked(state, policy, now)
+	return toBudgetView(normalizedAgent, policy, state)
+}
+
+// UpdateBudget mutates runtime budget policy for one agent.
+func (m *BudgetManager) UpdateBudget(agent string, update BudgetUpdate) error {
+	normalizedAgent := normalizeAgent(agent)
+	now := m.clock.Now().UTC()
+
+	if update.LimitUSD < 0 {
+		return fmt.Errorf("limit_usd must be non-negative")
+	}
+	if update.DowngradeThresholdPct < 0 || update.DowngradeThresholdPct > 100 {
+		return fmt.Errorf("downgrade_threshold_pct must be between 0 and 100")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	policy := m.policyForAgentLocked(normalizedAgent)
+	policy.limitUSD = update.LimitUSD
+	policy.period = update.Period
+	policy.actionOnExceed = update.ActionOnExceed
+	policy.downgradeThresholdPct = update.DowngradeThresholdPct
+	policy.downgradeChain = append([]string(nil), update.DowngradeChain...)
+	policy.alertThresholdsPct = append([]float64(nil), update.AlertThresholdsPct...)
+	m.agentPolicy[normalizedAgent] = policy
+
+	state := m.stateForAgentLocked(normalizedAgent, policy, now)
+	m.maybeResetPeriodLocked(state, policy, now)
+	return nil
+}
+
+// ResetBudget clears spent state for one agent.
+func (m *BudgetManager) ResetBudget(agent string) {
+	normalizedAgent := normalizeAgent(agent)
+	now := m.clock.Now().UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	policy := m.policyForAgentLocked(normalizedAgent)
+	state := m.stateForAgentLocked(normalizedAgent, policy, now)
+	state.spentUSD = 0
+	state.lastAlertedPct = 0
+	state.periodStartedAt = now
+	state.periodResetsAt = nextPeriodReset(now, policy.period)
+	state.triggeredAlerts = make(map[float64]bool)
+	state.requestTimes = state.requestTimes[:0]
+}
+
+func toBudgetView(agent string, policy agentPolicy, state *agentState) BudgetView {
+	remaining := policy.limitUSD - state.spentUSD
+	if remaining < 0 {
+		remaining = 0
+	}
+	status := "active"
+	if state.killed {
+		status = "killed"
+	}
+	return BudgetView{
+		Agent:           agent,
+		Status:          status,
+		Period:          policy.period,
+		ActionOnExceed:  policy.actionOnExceed,
+		PeriodStartedAt: state.periodStartedAt,
+		PeriodResetsAt:  state.periodResetsAt,
+		LimitUSD:        policy.limitUSD,
+		SpentUSD:        state.spentUSD,
+		RemainingUSD:    remaining,
+		PercentageUsed:  percentageUsed(policy.limitUSD, state.spentUSD),
 	}
 }
