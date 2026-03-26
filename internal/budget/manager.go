@@ -2,6 +2,7 @@ package budget
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OberWatch/oberwatch/internal/alert"
 	"github.com/OberWatch/oberwatch/internal/config"
 )
 
@@ -81,12 +83,18 @@ type Snapshot struct {
 	Killed          bool
 }
 
+// Dispatcher routes budget-generated alert events.
+type Dispatcher interface {
+	Dispatch(context.Context, alert.Alert)
+}
+
 // BudgetManager tracks agent spend and applies budget enforcement rules.
 //
 //nolint:revive,govet // Name required by spec; field grouping aids maintainability.
 type BudgetManager struct {
 	clock        Clock
 	logger       *slog.Logger
+	dispatcher   Dispatcher
 	defaultState agentPolicy
 
 	mu          sync.RWMutex
@@ -99,11 +107,16 @@ type BudgetManager struct {
 
 // NewManager creates a budget manager from gate configuration.
 func NewManager(gate config.GateConfig, logger *slog.Logger) *BudgetManager {
-	return NewManagerWithClock(gate, logger, realClock{})
+	return NewManagerWithClockAndDispatcher(gate, logger, realClock{}, nil)
 }
 
 // NewManagerWithClock creates a budget manager with an explicit clock.
 func NewManagerWithClock(gate config.GateConfig, logger *slog.Logger, clock Clock) *BudgetManager {
+	return NewManagerWithClockAndDispatcher(gate, logger, clock, nil)
+}
+
+// NewManagerWithClockAndDispatcher creates a budget manager with explicit clock and alert dispatcher.
+func NewManagerWithClockAndDispatcher(gate config.GateConfig, logger *slog.Logger, clock Clock, dispatcher Dispatcher) *BudgetManager {
 	if clock == nil {
 		clock = realClock{}
 	}
@@ -111,6 +124,7 @@ func NewManagerWithClock(gate config.GateConfig, logger *slog.Logger, clock Cloc
 	manager := &BudgetManager{
 		clock:       clock,
 		logger:      logger,
+		dispatcher:  dispatcher,
 		agentPolicy: make(map[string]agentPolicy),
 		state:       make(map[string]*agentState),
 		apiKeyMap:   append([]config.APIKeyMapEntry(nil), gate.APIKeyMap...),
@@ -178,9 +192,13 @@ func (m *BudgetManager) CheckBudget(agent string, estimatedCostUSD float64) Acti
 func (m *BudgetManager) CheckBudgetDetailed(agent string, estimatedCostUSD float64) Decision {
 	normalizedAgent := normalizeAgent(agent)
 	now := m.clock.Now().UTC()
+	queuedAlerts := make([]alert.Alert, 0, 2)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.dispatchAlerts(queuedAlerts)
+	}()
 
 	policy := m.policyForAgentLocked(normalizedAgent)
 	state := m.stateForAgentLocked(normalizedAgent, policy, now)
@@ -212,6 +230,11 @@ func (m *BudgetManager) CheckBudgetDetailed(agent string, estimatedCostUSD float
 
 	if m.registerRequestAndDetectRunawayLocked(state, now) {
 		state.killed = true
+		queuedAlerts = append(
+			queuedAlerts,
+			alert.NewRunawayDetectedAlert(normalizedAgent, len(state.requestTimes), m.runaway.WindowSeconds),
+			alert.NewAgentKilledAlert(normalizedAgent, "runaway_detected"),
+		)
 		return Decision{
 			Action:   ActionKill,
 			Code:     "agent_killed",
@@ -229,7 +252,15 @@ func (m *BudgetManager) CheckBudgetDetailed(agent string, estimatedCostUSD float
 
 	projectedSpend := state.spentUSD + estimatedCostUSD
 	if policy.limitUSD > 0 && projectedSpend > policy.limitUSD {
-		return m.overLimitDecision(normalizedAgent, policy, state, projectedSpend)
+		decision := m.overLimitDecision(normalizedAgent, policy, state, projectedSpend)
+		queuedAlerts = append(
+			queuedAlerts,
+			alert.NewBudgetExceededAlert(normalizedAgent, projectedSpend, policy.limitUSD, string(decision.Action)),
+		)
+		if decision.Action == ActionKill {
+			queuedAlerts = append(queuedAlerts, alert.NewAgentKilledAlert(normalizedAgent, "budget_exceeded"))
+		}
+		return decision
 	}
 
 	if shouldDowngradeForThreshold(policy, projectedSpend) {
@@ -265,13 +296,17 @@ func (m *BudgetManager) CheckBudgetDetailed(agent string, estimatedCostUSD float
 func (m *BudgetManager) RecordSpend(agent string, costUSD float64) {
 	normalizedAgent := normalizeAgent(agent)
 	now := m.clock.Now().UTC()
+	queuedAlerts := make([]alert.Alert, 0, 2)
 
 	if costUSD < 0 {
 		costUSD = 0
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.dispatchAlerts(queuedAlerts)
+	}()
 
 	policy := m.policyForAgentLocked(normalizedAgent)
 	state := m.stateForAgentLocked(normalizedAgent, policy, now)
@@ -290,6 +325,14 @@ func (m *BudgetManager) RecordSpend(agent string, costUSD float64) {
 		}
 		state.triggeredAlerts[threshold] = true
 		state.lastAlertedPct = threshold
+		queuedAlerts = append(queuedAlerts, alert.NewBudgetThresholdAlert(
+			normalizedAgent,
+			threshold,
+			state.spentUSD,
+			policy.limitUSD,
+			string(policy.actionOnExceed),
+			state.periodStartedAt,
+		))
 		if m.logger != nil {
 			m.logger.Warn(
 				"budget threshold reached",
@@ -331,13 +374,18 @@ func (m *BudgetManager) Snapshot(agent string) Snapshot {
 func (m *BudgetManager) KillAgent(agent string) {
 	normalizedAgent := normalizeAgent(agent)
 	now := m.clock.Now().UTC()
+	queuedAlerts := make([]alert.Alert, 0, 1)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.dispatchAlerts(queuedAlerts)
+	}()
 
 	policy := m.policyForAgentLocked(normalizedAgent)
 	state := m.stateForAgentLocked(normalizedAgent, policy, now)
 	state.killed = true
+	queuedAlerts = append(queuedAlerts, alert.NewAgentKilledAlert(normalizedAgent, "manual_kill"))
 }
 
 // EnableAgent re-enables a killed agent.
@@ -588,4 +636,14 @@ func extractAPIKey(request *http.Request) string {
 	}
 
 	return strings.TrimSpace(request.Header.Get("x-api-key"))
+}
+
+func (m *BudgetManager) dispatchAlerts(events []alert.Alert) {
+	if m.dispatcher == nil || len(events) == 0 {
+		return
+	}
+	ctx := context.Background()
+	for _, event := range events {
+		m.dispatcher.Dispatch(ctx, event)
+	}
 }

@@ -1,18 +1,38 @@
 package budget
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/OberWatch/oberwatch/internal/alert"
 	"github.com/OberWatch/oberwatch/internal/config"
 )
 
 type mockClock struct {
 	now time.Time
 	mu  sync.RWMutex
+}
+
+//nolint:govet // keep mutex first for concurrency-focused helper readability.
+type capturingDispatcher struct {
+	mu     sync.Mutex
+	events []alert.Alert
+}
+
+func (d *capturingDispatcher) Dispatch(_ context.Context, event alert.Alert) {
+	d.mu.Lock()
+	d.events = append(d.events, event)
+	d.mu.Unlock()
+}
+
+func (d *capturingDispatcher) snapshot() []alert.Alert {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]alert.Alert(nil), d.events...)
 }
 
 func newMockClock(start time.Time) *mockClock {
@@ -321,6 +341,85 @@ func TestRecordSpendThresholdAlert(t *testing.T) {
 	manager.RecordSpend("agent-a", 3.0) // crosses 80%
 	if got := manager.Snapshot("agent-a").LastAlertedPct; got != 80 {
 		t.Fatalf("last alerted pct after crossing 80%% = %v, want 80", got)
+	}
+}
+
+func TestBudgetManager_DispatchesThresholdAndKillAlerts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setup     func(*config.GateConfig)
+		prepare   func(*BudgetManager)
+		act       func(*BudgetManager)
+		wantTypes []alert.Type
+	}{
+		{
+			name: "record spend crossing threshold dispatches budget_threshold",
+			prepare: func(manager *BudgetManager) {
+				manager.RecordSpend("agent-a", 4.9)
+			},
+			act: func(manager *BudgetManager) {
+				manager.RecordSpend("agent-a", 0.2) // cross 50%
+			},
+			wantTypes: []alert.Type{alert.TypeBudgetThreshold},
+		},
+		{
+			name: "over-limit kill dispatches budget_exceeded and agent_killed",
+			setup: func(cfg *config.GateConfig) {
+				cfg.DefaultBudget.ActionOnExceed = config.BudgetActionKill
+				cfg.DefaultBudget.LimitUSD = 1
+			},
+			act: func(manager *BudgetManager) {
+				_ = manager.CheckBudgetDetailed("agent-a", 2)
+			},
+			wantTypes: []alert.Type{alert.TypeBudgetExceeded, alert.TypeAgentKilled},
+		},
+		{
+			name: "runaway detection dispatches runaway and killed alerts",
+			setup: func(cfg *config.GateConfig) {
+				cfg.Runaway.Enabled = true
+				cfg.Runaway.MaxRequests = 1
+				cfg.Runaway.WindowSeconds = 60
+			},
+			prepare: func(manager *BudgetManager) {
+				_ = manager.CheckBudget("agent-a", 0)
+			},
+			act: func(manager *BudgetManager) {
+				_ = manager.CheckBudget("agent-a", 0)
+			},
+			wantTypes: []alert.Type{alert.TypeRunawayDetected, alert.TypeAgentKilled},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			clock := newMockClock(time.Date(2026, time.March, 26, 12, 0, 0, 0, time.UTC))
+			cfg := baseGateConfig()
+			if tt.setup != nil {
+				tt.setup(&cfg)
+			}
+			dispatcher := &capturingDispatcher{}
+			manager := NewManagerWithClockAndDispatcher(cfg, nil, clock, dispatcher)
+
+			if tt.prepare != nil {
+				tt.prepare(manager)
+			}
+			tt.act(manager)
+
+			events := dispatcher.snapshot()
+			if len(events) != len(tt.wantTypes) {
+				t.Fatalf("alert count = %d, want %d", len(events), len(tt.wantTypes))
+			}
+			for i := range tt.wantTypes {
+				if events[i].Type != tt.wantTypes[i] {
+					t.Fatalf("alert[%d].Type = %q, want %q", i, events[i].Type, tt.wantTypes[i])
+				}
+			}
+		})
 	}
 }
 
