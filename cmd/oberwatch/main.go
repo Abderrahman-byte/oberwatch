@@ -4,6 +4,9 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/OberWatch/oberwatch/internal/config"
+	"github.com/spf13/cobra"
 )
 
 func main() {
@@ -14,6 +17,13 @@ func main() {
 }
 
 func run() error {
-	// TODO: Initialize CLI with cobra, config, and subcommand routing.
-	return nil
+	rootCmd := &cobra.Command{
+		Use:   "oberwatch",
+		Short: "Oberwatch — proxy and observability platform for AI agents",
+	}
+
+	rootCmd.AddCommand(config.NewInitCmd())
+	rootCmd.AddCommand(config.NewValidateCmd())
+
+	return rootCmd.Execute()
 }
