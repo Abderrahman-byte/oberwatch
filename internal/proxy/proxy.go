@@ -12,10 +12,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/OberWatch/oberwatch/internal/budget"
 	"github.com/OberWatch/oberwatch/internal/config"
 	"github.com/OberWatch/oberwatch/internal/pricing"
+	"github.com/OberWatch/oberwatch/internal/storage"
 )
 
 const (
@@ -26,10 +28,14 @@ const (
 type budgetContextKey struct{}
 
 type budgetRequestMeta struct {
-	agent     string
-	model     string
-	provider  string
-	streaming bool
+	agent         string
+	model         string
+	provider      string
+	traceID       string
+	taskID        string
+	originalModel string
+	streaming     bool
+	downgraded    bool
 }
 
 // Hook is a middleware callback executed for each request.
@@ -37,11 +43,12 @@ type Hook func(*http.Request)
 
 // Hooks contains middleware callbacks used by the proxy chain.
 type Hooks struct {
-	Gate    Hook
-	Trace   Hook
-	Budget  *budget.BudgetManager
-	Pricing *pricing.PricingTable
-	Logger  *slog.Logger
+	Gate     Hook
+	Trace    Hook
+	Budget   *budget.BudgetManager
+	Pricing  *pricing.PricingTable
+	CostSink storage.CostRecordSink
+	Logger   *slog.Logger
 }
 
 // Server is the HTTP reverse proxy for upstream LLM providers.
@@ -91,6 +98,7 @@ func New(cfg config.Config, hooks Hooks) (*Server, error) {
 				meta,
 				hooks.Budget,
 				hooks.Pricing,
+				hooks.CostSink,
 				hooks.Logger,
 			)
 			return nil
@@ -205,6 +213,8 @@ func gateMiddleware(hooks Hooks) func(http.Handler) http.Handler {
 					return
 				}
 				model, streaming := extractModelAndStream(requestBody)
+				originalModel := model
+				downgraded := false
 
 				estimatedInputTokens := len(requestBody) / 4
 				estimatedCost := hooks.Pricing.CalculateCost(model, estimatedInputTokens, 0)
@@ -218,16 +228,18 @@ func gateMiddleware(hooks Hooks) func(http.Handler) http.Handler {
 					writeBudgetError(w, decision, http.StatusTooManyRequests)
 					return
 				case budget.ActionDowngrade:
-					rewritten, originalModel, newModel, downgraded, rewriteErr := hooks.Budget.RewriteModelForDowngrade(agent, requestBody)
+					rewritten, currentModel, newModel, changed, rewriteErr := hooks.Budget.RewriteModelForDowngrade(agent, requestBody)
 					if rewriteErr != nil {
 						writeConfigError(w, fmt.Sprintf("rewrite downgrade body: %v", rewriteErr))
 						return
 					}
 
-					if downgraded {
+					if changed {
 						requestBody = rewritten
 						model = newModel
-						logDowngrade(hooks.Logger, agent, originalModel, newModel)
+						originalModel = currentModel
+						downgraded = true
+						logDowngrade(hooks.Logger, agent, currentModel, newModel)
 					} else if decision.Over {
 						writeBudgetError(w, decision, http.StatusTooManyRequests)
 						return
@@ -242,10 +254,14 @@ func gateMiddleware(hooks Hooks) func(http.Handler) http.Handler {
 					return io.NopCloser(bytes.NewReader(requestBody)), nil
 				}
 				meta := budgetRequestMeta{
-					agent:     agent,
-					model:     model,
-					provider:  string(detectProvider(r.URL.Path, config.ProviderOpenAI)),
-					streaming: streaming,
+					agent:         agent,
+					model:         model,
+					provider:      string(detectProvider(r.URL.Path, config.ProviderOpenAI)),
+					traceID:       strings.TrimSpace(r.Header.Get("X-Oberwatch-Trace-ID")),
+					taskID:        strings.TrimSpace(r.Header.Get("X-Oberwatch-Task")),
+					originalModel: originalModel,
+					streaming:     streaming,
+					downgraded:    downgraded,
 				}
 				*r = *r.WithContext(context.WithValue(r.Context(), budgetContextKey{}, meta))
 			}
@@ -289,6 +305,7 @@ type budgetTrackingBody struct {
 	inner       io.ReadCloser
 	manager     *budget.BudgetManager
 	pricing     *pricing.PricingTable
+	sink        storage.CostRecordSink
 	logger      *slog.Logger
 	meta        budgetRequestMeta
 	contentType string
@@ -301,6 +318,7 @@ func newBudgetTrackingBody(
 	meta budgetRequestMeta,
 	manager *budget.BudgetManager,
 	pricingTable *pricing.PricingTable,
+	sink storage.CostRecordSink,
 	logger *slog.Logger,
 ) io.ReadCloser {
 	return &budgetTrackingBody{
@@ -310,6 +328,7 @@ func newBudgetTrackingBody(
 		meta:        meta,
 		manager:     manager,
 		pricing:     pricingTable,
+		sink:        sink,
 		logger:      logger,
 	}
 }
@@ -353,6 +372,21 @@ func (b *budgetTrackingBody) finalize() {
 
 		cost := b.pricing.CalculateCost(b.meta.model, usage.InputTokens, usage.OutputTokens)
 		b.manager.RecordSpend(b.meta.agent, cost)
+		if b.sink != nil {
+			b.sink.Enqueue(storage.CostRecord{
+				Agent:         b.meta.agent,
+				Model:         b.meta.model,
+				Provider:      b.meta.provider,
+				TraceID:       b.meta.traceID,
+				TaskID:        b.meta.taskID,
+				OriginalModel: b.meta.originalModel,
+				InputTokens:   usage.InputTokens,
+				OutputTokens:  usage.OutputTokens,
+				CostUSD:       cost,
+				Downgraded:    b.meta.downgraded,
+				CreatedAt:     time.Now().UTC(),
+			})
+		}
 	})
 }
 

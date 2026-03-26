@@ -15,6 +15,7 @@ import (
 	"github.com/OberWatch/oberwatch/internal/budget"
 	"github.com/OberWatch/oberwatch/internal/config"
 	"github.com/OberWatch/oberwatch/internal/pricing"
+	"github.com/OberWatch/oberwatch/internal/storage"
 )
 
 func TestDetectProvider_TableDriven(t *testing.T) {
@@ -412,6 +413,7 @@ func TestBudgetTrackingBody_FinalizePaths(t *testing.T) {
 		manager,
 		table,
 		nil,
+		nil,
 	)
 	if _, err := io.ReadAll(tracker); err != nil {
 		t.Fatalf("ReadAll() error = %v", err)
@@ -431,6 +433,7 @@ func TestBudgetTrackingBody_FinalizePaths(t *testing.T) {
 		budgetRequestMeta{agent: "agent-usage", model: "gpt-4o", provider: "openai"},
 		manager,
 		table,
+		nil,
 		nil,
 	)
 	if _, err := io.ReadAll(tracker); err != nil {
@@ -492,8 +495,67 @@ func TestHelperFunctions_TableDriven(t *testing.T) {
 	}
 }
 
+func TestBudgetTrackingBody_EnqueuesCostRecord(t *testing.T) {
+	t.Parallel()
+
+	type sink struct {
+		records []storage.CostRecord
+		mu      sync.Mutex
+	}
+	var testSink sink
+	enqueue := &struct{ storage.CostRecordSink }{}
+	enqueue.CostRecordSink = sinkFunc(func(record storage.CostRecord) {
+		testSink.mu.Lock()
+		testSink.records = append(testSink.records, record)
+		testSink.mu.Unlock()
+	})
+
+	cfg := config.DefaultConfig()
+	manager := budget.NewManager(cfg.Gate, nil)
+	table := pricing.NewPricingTableFromConfig(cfg.Pricing, nil)
+
+	reader := newBudgetTrackingBody(
+		io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":10,"completion_tokens":5}}`)),
+		http.StatusOK,
+		"application/json",
+		budgetRequestMeta{
+			agent:     "agent-a",
+			model:     "gpt-4o",
+			provider:  "openai",
+			traceID:   "tr-1",
+			taskID:    "task-1",
+			streaming: false,
+		},
+		manager,
+		table,
+		enqueue.CostRecordSink,
+		nil,
+	)
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	testSink.mu.Lock()
+	defer testSink.mu.Unlock()
+	if len(testSink.records) != 1 {
+		t.Fatalf("sink record count = %d, want 1", len(testSink.records))
+	}
+	if testSink.records[0].TraceID != "tr-1" || testSink.records[0].TaskID != "task-1" {
+		t.Fatalf("persisted cost record metadata = %#v, want trace/task IDs", testSink.records[0])
+	}
+}
+
 type errorReadCloser struct {
 	err error
+}
+
+type sinkFunc func(storage.CostRecord)
+
+func (f sinkFunc) Enqueue(record storage.CostRecord) {
+	f(record)
 }
 
 func (e errorReadCloser) Read([]byte) (int, error) {
