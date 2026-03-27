@@ -19,8 +19,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
       - name: Build dashboard
         run: cd dashboard/svelte && npm ci && npm run build
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -28,12 +30,36 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          MINOR=${VERSION%.*}
+          echo "full=$VERSION" >> $GITHUB_OUTPUT
+          echo "minor=$MINOR" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
+          context: .
           push: true
           tags: |
-            oberwatch/oberwatch:${{ github.ref_name }}
-            oberwatch/oberwatch:latest
-            ghcr.io/oberwatch/oberwatch:${{ github.ref_name }}
+            ghcr.io/oberwatch/oberwatch:${{ steps.version.outputs.full }}
+            ghcr.io/oberwatch/oberwatch:${{ steps.version.outputs.minor }}
             ghcr.io/oberwatch/oberwatch:latest
+            oberwatch/oberwatch:${{ steps.version.outputs.full }}
+            oberwatch/oberwatch:latest
