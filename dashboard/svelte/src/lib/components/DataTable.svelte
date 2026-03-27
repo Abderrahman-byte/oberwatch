@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+
   export type SortDirection = 'asc' | 'desc';
   export type ColumnDef = {
     key: string;
@@ -10,11 +12,13 @@
   let {
     columns,
     rows,
-    onSort
+    onSort,
+    cellRenderers
   }: {
     columns: ColumnDef[];
     rows: RowData[];
     onSort?: (key: string, direction: SortDirection) => void;
+    cellRenderers?: Record<string, Snippet<[RowData]>>;
   } = $props();
 
   let sortKey = $state<string | null>(null);
@@ -112,10 +116,14 @@
           <tr class="bg-surface transition-colors hover:bg-elevated">
             {#each columns as column}
               <td class="px-4 py-3 text-sm text-text-primary">
-                {#if row[column.key] === null || row[column.key] === undefined}
-                  <span class="text-text-muted">-</span>
+                {#if cellRenderers?.[column.key]}
+                  {@render cellRenderers[column.key](row)}
                 {:else}
-                  {String(row[column.key])}
+                  {#if row[column.key] === null || row[column.key] === undefined}
+                    <span class="text-text-muted">-</span>
+                  {:else}
+                    {String(row[column.key])}
+                  {/if}
                 {/if}
               </td>
             {/each}

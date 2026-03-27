@@ -35,6 +35,7 @@ Thumbs.db
 # Dashboard build output
 dashboard/svelte/build/
 dashboard/svelte/node_modules/
+dashboard/svelte/.svelte-kit/
 
 # Temporary files
 tmp/
