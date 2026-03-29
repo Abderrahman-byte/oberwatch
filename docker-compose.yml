@@ -5,7 +5,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./oberwatch.toml:/etc/oberwatch/oberwatch.toml:ro
+      - ${PWD}/oberwatch.toml:/etc/oberwatch/oberwatch.toml:ro
       - oberwatch-data:/data
       - ./scenarios:/scenarios:ro
     environment:

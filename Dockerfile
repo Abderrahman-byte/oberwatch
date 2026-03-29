@@ -1,6 +1,6 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
-RUN apk add --no-cache git make nodejs npm
+RUN apk add --no-cache git make nodejs npm build-base
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -17,6 +17,7 @@ RUN CGO_ENABLED=1 go build -ldflags="-s -w -X main.version=${VERSION}" -o oberwa
 # Runtime stage
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates sqlite-libs
+RUN mkdir -p /etc/oberwatch
 COPY --from=builder /app/oberwatch /usr/local/bin/oberwatch
 
 EXPOSE 8080
